@@ -47,24 +47,25 @@ impl<'a, P: Param> SliderRegion<'a, P> {
         let value = self.param.unmodulated_normalized_value();
         if response.drag_started() {
             self.param_setter.begin_set_parameter(self.param);
-            ui.memory().data.insert_temp(*DRAG_AMOUNT_MEMORY_ID, value)
+            ui.memory_mut(|i| i.data.insert_temp(*DRAG_AMOUNT_MEMORY_ID, value))
         }
 
         if response.dragged() {
             let delta: f32;
             // Invert the y axis, since we want dragging up to increase the value and down to
             // decrease it, but drag_delta() has the y-axis increasing downwards.
-            if ui.input().modifiers.shift {
+            if ui.input(|i| i.modifiers.shift) {
                 delta = -response.drag_delta().y * GRANULAR_DRAG_MULTIPLIER;
             } else {
                 delta = -response.drag_delta().y;
             }
 
-            let mut memory = ui.memory();
-            let value = memory.data.get_temp_mut_or(*DRAG_AMOUNT_MEMORY_ID, value);
-            *value = (*value + delta / 100.0).clamp(0.0, 1.0);
-            self.param_setter
-                .set_parameter_normalized(self.param, *value);
+            ui.memory_mut(|i| {
+                let value = i.data.get_temp_mut_or(*DRAG_AMOUNT_MEMORY_ID, value);
+                *value = (*value + delta / 100.0).clamp(0.0, 1.0);
+                self.param_setter
+                    .set_parameter_normalized(self.param, *value);
+            });
         }
 
         // Reset on doubleclick
@@ -139,84 +140,84 @@ impl<'a, P: Param> ArcKnob<'a, P> {
     }
 
     // Specify outline drawing
-    pub fn use_outline(mut self, new_bool: bool) -> Self {
+    pub fn use_outline(&mut self, new_bool: bool) -> &Self {
         self.outline = new_bool;
         self
     }
 
     // Specify showing value when mouse-over
-    pub fn use_hover_text(mut self, new_bool: bool) -> Self {
+    pub fn use_hover_text(&mut self, new_bool: bool) -> &Self {
         self.hover_text = new_bool;
         self
     }
 
     // Specify value when mouse-over
-    pub fn set_hover_text(mut self, new_text: String) -> Self {
+    pub fn set_hover_text(&mut self, new_text: String) -> &Self {
         self.hover_text_content = new_text;
         self
     }
 
     // Specify knob label
-    pub fn set_label(mut self, new_label: String) -> Self {
+    pub fn set_label(&mut self, new_label: String) -> &Self {
         self.label_text = new_label;
         self
     }
 
     // Specify line color for knob outside
-    pub fn set_line_color(mut self, new_color: Color32) -> Self {
+    pub fn set_line_color(&mut self, new_color: Color32) -> &Self {
         self.line_color = new_color;
         self
     }
 
     // Specify fill color for knob
-    pub fn set_fill_color(mut self, new_color: Color32) -> Self {
+    pub fn set_fill_color(&mut self, new_color: Color32) -> &Self {
         self.fill_color = new_color;
         self
     }
 
     // Specify center knob size
-    pub fn set_center_size(mut self, size: f32) -> Self {
+    pub fn set_center_size(&mut self, size: f32) -> &Self {
         self.center_size = size;
         self
     }
 
     // Specify line width
-    pub fn set_line_width(mut self, width: f32) -> Self {
+    pub fn set_line_width(&mut self, width: f32) -> &Self {
         self.line_width = width;
         self
     }
 
     // Specify distance between center and arc
-    pub fn set_center_to_line_space(mut self, new_width: f32) -> Self {
+    pub fn set_center_to_line_space(&mut self, new_width: f32) -> &Self {
         self.center_to_line_space = new_width;
         self
     }
 
     // Set text size for label
-    pub fn set_text_size(mut self, text_size: f32) -> Self {
+    pub fn set_text_size(&mut self, text_size: f32) -> &Self {
         self.text_size = text_size;
         self
     }
 
     // Set knob padding
-    pub fn set_padding(mut self, padding: f32) -> Self {
+    pub fn set_padding(&mut self, padding: f32) -> &Self {
         self.padding = padding;
         self
     }
 
     // Set center value of knob visibility
-    pub fn set_show_center_value(mut self, new_bool: bool) -> Self {
+    pub fn set_show_center_value(&mut self, new_bool: bool) -> &Self {
         self.show_center_value = new_bool;
         self
     }
 
     // Set center value of knob visibility
-    pub fn set_show_label(mut self, new_bool: bool) -> Self {
+    pub fn set_show_label(&mut self, new_bool: bool) -> &Self {
         self.show_label = new_bool;
         self
     }
 
-    pub fn preset_style(mut self, style_id: KnobStyle) -> Self {
+    pub fn preset_style(&mut self, style_id: KnobStyle) -> &Self {
         // These are all calculated off radius to scale better
         match style_id {
             KnobStyle::SmallTogether => {
