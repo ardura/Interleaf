@@ -19,38 +19,40 @@ use CustomVerticalSlider::ParamSlider as VerticalParamSlider;
 use biquad_filters::FilterType;
 
 /**************************************************
- * Fawn Faders by Ardura
+ * Interleaf by Ardura
+ *   This is a parametric EQ using interleaved biquads
+ *   of up to 10 interleaves with 5 bands!
  *
- * Build with: cargo xtask bundle FawnFaders
+ * Build with: cargo xtask bundle Interleaf --profile release
  * ************************************************/
 
 // GUI Colors
-const WHITE: Color32 = Color32::from_rgb(242, 243, 244);
-const GRAY: Color32 = Color32::from_rgb(78, 81, 90);
+const LIGHT: Color32 = Color32::from_rgb(206,185,146);
+const MAIN: Color32 = Color32::from_rgb(115,147,126);
 const BLACK: Color32 = Color32::from_rgb(4, 7, 14);
-const TEAL: Color32 = Color32::from_rgb(110, 201, 235);
-const DARKTEAL: Color32 = Color32::from_rgb(37, 68, 90);
+const ACCENT: Color32 = Color32::from_rgb(48,99,142);
 
 // Plugin sizing
 const WIDTH: u32 = 370;
-const HEIGHT: u32 = 720;
+const HEIGHT: u32 = 660;
 
 // Constants
 const VERT_BAR_HEIGHT: f32 = 260.0;
 const VERT_BAR_WIDTH: f32 = 32.0;
 
 /// The time it takes for the peak meter to decay by 12 dB after switching to complete silence.
-const PEAK_METER_DECAY_MS: f64 = 100.0;
+const PEAK_METER_DECAY_MS: f64 = 360.0;
 
 const MAIN_FONT: nih_plug_egui::egui::FontId = FontId::monospace(8.0);
 
 #[derive(Clone, Copy)]
 struct EQ {
-    bands: [biquad_filters::Biquad; 1],
+    non_interleave_bands: [biquad_filters::Biquad; 5],
+    interleave_bands: [biquad_filters::InterleavedBiquad; 5],
 }
 
-pub struct FawnFaders {
-    params: Arc<FawnFadersParams>,
+pub struct Interleaf {
+    params: Arc<InterleafParams>,
 
     // normalize the peak meter's response based on the sample rate with this
     out_meter_decay_weight: f32,
@@ -64,7 +66,7 @@ pub struct FawnFaders {
 }
 
 #[derive(Params)]
-struct FawnFadersParams {
+struct InterleafParams {
     #[persist = "editor-state"]
     editor_state: Arc<EguiState>,
 
@@ -79,6 +81,9 @@ struct FawnFadersParams {
 
     #[id = "oversampling"]
     pub oversampling: FloatParam,
+
+    #[id = "interleaves"]
+    pub interleaves: FloatParam,
 
     // Bands
     #[id = "freq_band_0"]
@@ -127,29 +132,51 @@ struct FawnFadersParams {
 
     #[id = "res_band_4"]
     pub res_band_4: FloatParam,
+
+    // Band Types
+    #[id = "type_0"]
+    pub type_0: EnumParam<biquad_filters::FilterType>,
+
+    #[id = "type_1"]
+    pub type_1: EnumParam<biquad_filters::FilterType>,
+
+    #[id = "type_2"]
+    pub type_2: EnumParam<biquad_filters::FilterType>,
+
+    #[id = "type_3"]
+    pub type_3: EnumParam<biquad_filters::FilterType>,
+
+    #[id = "type_4"]
+    pub type_4: EnumParam<biquad_filters::FilterType>,
 }
 
-impl Default for FawnFaders {
+impl Default for Interleaf {
     fn default() -> Self {
         Self {
-            params: Arc::new(FawnFadersParams::default()),
+            params: Arc::new(InterleafParams::default()),
             out_meter_decay_weight: 1.0,
             out_meter: Arc::new(AtomicF32::new(util::MINUS_INFINITY_DB)),
             in_meter: Arc::new(AtomicF32::new(util::MINUS_INFINITY_DB)),
             // Hard code to 44100, will update in processing
             equalizer: Arc::new(Mutex::new(EQ {
-                bands: [
+                non_interleave_bands: [
                         // These defaults don't matter as they are overwritten immediately
                         biquad_filters::Biquad::new( 44100.0,800.0,0.0, 0.707, FilterType::Peak)
                         // 5 Bands of the above
-                        ; 1
+                        ; 5
+                    ],
+                interleave_bands: [
+                        // These defaults don't matter as they are overwritten immediately
+                        biquad_filters::InterleavedBiquad::new( 44100.0,800.0,0.0, 0.707, FilterType::Peak, 2)
+                        // 5 Bands of the above
+                        ; 5
                     ],
             })),
         }
     }
 }
 
-impl Default for FawnFadersParams {
+impl Default for InterleafParams {
     fn default() -> Self {
         Self {
             editor_state: EguiState::from_size(WIDTH, HEIGHT),
@@ -189,23 +216,35 @@ impl Default for FawnFadersParams {
                 .with_string_to_value(formatters::s2v_f32_percentage()),
 
             oversampling: FloatParam::new(
-                "Oversample",
+                "x2",
                 0.0,
                 FloatRange::Linear {
                     min: 0.0,
-                    max: 2.0,
+                    max: 1.0,
                 },
             )
+            .with_value_to_string(format_x2())
             .with_step_size(1.0),
+
+            interleaves: FloatParam::new(
+                "Interleave",
+                4.0,
+                FloatRange::Linear {
+                    min: 1.0,
+                    max: 10.0,
+                },
+            )
+            .with_step_size(1.0)
+            .with_value_to_string(format_interleave()),
 
             // Non Param Buttons
             freq_band_0: FloatParam::new(
                 "Band 0",
-                120.0,
+                200.0,
                 FloatRange::Skewed {
                     min: 1.0,
                     max: 20000.0,
-                    factor: 0.5,
+                    factor: 0.3,
                 },
             )
             .with_step_size(1.0)
@@ -213,11 +252,11 @@ impl Default for FawnFadersParams {
             .with_value_to_string(formatters::v2s_f32_hz_then_khz_with_note_name(2, false)),
             freq_band_1: FloatParam::new(
                 "Band 1",
-                360.0,
+                800.0,
                 FloatRange::Skewed {
                     min: 1.0,
                     max: 20000.0,
-                    factor: 0.5,
+                    factor: 0.4,
                 },
             )
             .with_step_size(1.0)
@@ -225,7 +264,7 @@ impl Default for FawnFadersParams {
             .with_value_to_string(formatters::v2s_f32_hz_then_khz_with_note_name(2, false)),
             freq_band_2: FloatParam::new(
                 "Band 2",
-                1200.0,
+                2000.0,
                 FloatRange::Skewed {
                     min: 1.0,
                     max: 20000.0,
@@ -237,11 +276,11 @@ impl Default for FawnFadersParams {
             .with_value_to_string(formatters::v2s_f32_hz_then_khz_with_note_name(2, false)),
             freq_band_3: FloatParam::new(
                 "Band 3",
-                5000.0,
+                8000.0,
                 FloatRange::Skewed {
                     min: 1.0,
                     max: 20000.0,
-                    factor: 0.5,
+                    factor: 0.7,
                 },
             )
             .with_step_size(1.0)
@@ -249,11 +288,11 @@ impl Default for FawnFadersParams {
             .with_value_to_string(formatters::v2s_f32_hz_then_khz_with_note_name(2, false)),
             freq_band_4: FloatParam::new(
                 "Band 4",
-                12000.0,
+                15000.0,
                 FloatRange::Skewed {
                     min: 1.0,
                     max: 20000.0,
-                    factor: 0.5,
+                    factor: 1.0,
                 },
             )
             .with_step_size(1.0)
@@ -359,13 +398,21 @@ impl Default for FawnFadersParams {
             )
             .with_smoother(SmoothingStyle::Linear(50.0))
             .with_value_to_string(formatters::v2s_f32_rounded(1)),
+
+            // Band types
+            type_0: EnumParam::new("Type 0", FilterType::LowShelf),
+            type_1: EnumParam::new("Type 1", FilterType::Peak),
+            type_2: EnumParam::new("Type 2", FilterType::Peak),
+            type_3: EnumParam::new("Type 3", FilterType::Peak),
+            type_4: EnumParam::new("Type 4", FilterType::HighShelf),
         }
     }
 }
 
-impl FawnFaders {
+impl Interleaf {
     fn create_band_gui(
         ui: &mut Ui,
+        type_param: &EnumParam<FilterType>,
         freq_param: &FloatParam,
         gain_param: &FloatParam,
         res_param: &FloatParam,
@@ -379,18 +426,26 @@ impl FawnFaders {
                     .with_height(VERT_BAR_HEIGHT)
                     .set_reversed(true),
             );
+            let mut type_knob = ui_knob::ArcKnob::for_param(type_param, setter, knob_size);
+            type_knob.preset_style(ui_knob::KnobStyle::NewPresets2);
+            type_knob.set_fill_color(ACCENT);
+            type_knob.set_line_color(MAIN);
+            type_knob.set_show_label(true);
+            type_knob.set_text_size(10.0);
+            ui.add(type_knob);
+
             let mut freq_knob = ui_knob::ArcKnob::for_param(freq_param, setter, knob_size);
             freq_knob.preset_style(ui_knob::KnobStyle::NewPresets2);
-            freq_knob.set_fill_color(TEAL);
-            freq_knob.set_line_color(GRAY);
+            freq_knob.set_fill_color(ACCENT);
+            freq_knob.set_line_color(MAIN);
             freq_knob.set_show_label(true);
             freq_knob.set_text_size(10.0);
             ui.add(freq_knob);
 
             let mut res_knob = ui_knob::ArcKnob::for_param(res_param, setter, knob_size);
             res_knob.preset_style(ui_knob::KnobStyle::NewPresets2);
-            res_knob.set_fill_color(TEAL);
-            res_knob.set_line_color(GRAY);
+            res_knob.set_fill_color(ACCENT);
+            res_knob.set_line_color(MAIN);
             res_knob.set_show_label(true);
             res_knob.set_text_size(10.0);
             ui.add(res_knob);
@@ -398,8 +453,8 @@ impl FawnFaders {
     }
 }
 
-impl Plugin for FawnFaders {
-    const NAME: &'static str = "Fawn Faders";
+impl Plugin for Interleaf {
+    const NAME: &'static str = "Interleaf";
     const VENDOR: &'static str = "Ardura";
     const URL: &'static str = "https://github.com/ardura";
     const EMAIL: &'static str = "azviscarra@gmail.com";
@@ -442,17 +497,17 @@ impl Plugin for FawnFaders {
                     // Assign default colors
                     ui.style_mut().visuals.widgets.inactive.bg_stroke.color = BLACK;
                     ui.style_mut().visuals.widgets.inactive.bg_fill = BLACK;
-                    ui.style_mut().visuals.widgets.active.fg_stroke.color = TEAL;
-                    ui.style_mut().visuals.widgets.active.bg_stroke.color = TEAL;
-                    ui.style_mut().visuals.widgets.open.fg_stroke.color = TEAL;
-                    ui.style_mut().visuals.widgets.open.bg_fill = GRAY;
+                    ui.style_mut().visuals.widgets.active.fg_stroke.color = ACCENT;
+                    ui.style_mut().visuals.widgets.active.bg_stroke.color = ACCENT;
+                    ui.style_mut().visuals.widgets.open.fg_stroke.color = ACCENT;
+                    ui.style_mut().visuals.widgets.open.bg_fill = MAIN;
                     // Lettering on param sliders
-                    ui.style_mut().visuals.widgets.inactive.fg_stroke.color = TEAL;
+                    ui.style_mut().visuals.widgets.inactive.fg_stroke.color = ACCENT;
                     // Background of the bar in param sliders
-                    ui.style_mut().visuals.selection.bg_fill = TEAL;
-                    ui.style_mut().visuals.selection.stroke.color = TEAL;
+                    ui.style_mut().visuals.selection.bg_fill = ACCENT;
+                    ui.style_mut().visuals.selection.stroke.color = ACCENT;
                     // Unfilled background of the bar
-                    ui.style_mut().visuals.widgets.noninteractive.bg_fill = GRAY;
+                    ui.style_mut().visuals.widgets.noninteractive.bg_fill = MAIN;
 
                     // Set default font
                     ui.style_mut().override_font_id = Some(MAIN_FONT);
@@ -471,9 +526,9 @@ impl Plugin for FawnFaders {
                     ui.vertical(|ui| {
                         // Spacing :)
                         ui.label(
-                            RichText::new(" Fawn Faders")
+                            RichText::new(" Interleaf - Interleaving EQ")
                                 .font(FontId::proportional(14.0))
-                                .color(WHITE),
+                                .color(LIGHT),
                         )
                         .on_hover_text("by Ardura!");
 
@@ -489,9 +544,9 @@ impl Plugin for FawnFaders {
                         ui.allocate_space(egui::Vec2::splat(2.0));
                         let mut in_meter_obj =
                             db_meter::DBMeter::new(in_meter_normalized).text(in_meter_text);
-                        in_meter_obj.set_background_color(GRAY);
-                        in_meter_obj.set_bar_color(WHITE);
-                        in_meter_obj.set_border_color(BLACK);
+                        in_meter_obj.set_background_color(BLACK);
+                        in_meter_obj.set_bar_color(LIGHT);
+                        in_meter_obj.set_border_color(MAIN);
                         ui.add(in_meter_obj);
 
                         let out_meter =
@@ -505,9 +560,9 @@ impl Plugin for FawnFaders {
                         ui.allocate_space(egui::Vec2::splat(2.0));
                         let mut out_meter_obj =
                             db_meter::DBMeter::new(out_meter_normalized).text(out_meter_text);
-                        out_meter_obj.set_background_color(GRAY);
-                        out_meter_obj.set_bar_color(TEAL);
-                        out_meter_obj.set_border_color(DARKTEAL);
+                        out_meter_obj.set_background_color(BLACK);
+                        out_meter_obj.set_bar_color(ACCENT);
+                        out_meter_obj.set_border_color(MAIN);
                         ui.add(out_meter_obj);
 
                         ui.separator();
@@ -516,96 +571,114 @@ impl Plugin for FawnFaders {
                         egui::scroll_area::ScrollArea::horizontal()
                             .auto_shrink([true; 2])
                             .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    // Draw our band UI
-                                    Self::create_band_gui(
-                                        ui,
-                                        &params.freq_band_0,
-                                        &params.gain_band_0,
-                                        &params.res_band_0,
-                                        setter,
-                                        VERT_BAR_WIDTH,
-                                    );
-                                    Self::create_band_gui(
-                                        ui,
-                                        &params.freq_band_1,
-                                        &params.gain_band_1,
-                                        &params.res_band_1,
-                                        setter,
-                                        VERT_BAR_WIDTH,
-                                    );
-                                    Self::create_band_gui(
-                                        ui,
-                                        &params.freq_band_2,
-                                        &params.gain_band_2,
-                                        &params.res_band_2,
-                                        setter,
-                                        VERT_BAR_WIDTH,
-                                    );
-                                    Self::create_band_gui(
-                                        ui,
-                                        &params.freq_band_3,
-                                        &params.gain_band_3,
-                                        &params.res_band_3,
-                                        setter,
-                                        VERT_BAR_WIDTH,
-                                    );
-                                    Self::create_band_gui(
-                                        ui,
-                                        &params.freq_band_4,
-                                        &params.gain_band_4,
-                                        &params.res_band_4,
-                                        setter,
-                                        VERT_BAR_WIDTH,
-                                    );
+                                ui.vertical(|ui|{
+                                    ui.horizontal(|ui| {
+                                        // Draw our band UI
+                                        Self::create_band_gui(
+                                            ui,
+                                            &params.type_0,
+                                            &params.freq_band_0,
+                                            &params.gain_band_0,
+                                            &params.res_band_0,
+                                            setter,
+                                            VERT_BAR_WIDTH,
+                                        );
+                                        Self::create_band_gui(
+                                            ui,
+                                            &params.type_1,
+                                            &params.freq_band_1,
+                                            &params.gain_band_1,
+                                            &params.res_band_1,
+                                            setter,
+                                            VERT_BAR_WIDTH,
+                                        );
+                                        Self::create_band_gui(
+                                            ui,
+                                            &params.type_2,
+                                            &params.freq_band_2,
+                                            &params.gain_band_2,
+                                            &params.res_band_2,
+                                            setter,
+                                            VERT_BAR_WIDTH,
+                                        );
+                                        Self::create_band_gui(
+                                            ui,
+                                            &params.type_3,
+                                            &params.freq_band_3,
+                                            &params.gain_band_3,
+                                            &params.res_band_3,
+                                            setter,
+                                            VERT_BAR_WIDTH,
+                                        );
+                                        Self::create_band_gui(
+                                            ui,
+                                            &params.type_4,
+                                            &params.freq_band_4,
+                                            &params.gain_band_4,
+                                            &params.res_band_4,
+                                            setter,
+                                            VERT_BAR_WIDTH,
+                                        );
+                                    });
+                                    // Bottom controls
+                                    ui.horizontal(|ui| {
+                                        let mut os_knob = ui_knob::ArcKnob::for_param(
+                                            &params.oversampling,
+                                            setter,
+                                            VERT_BAR_WIDTH - 4.0,
+                                        );
+                                        os_knob.preset_style(ui_knob::KnobStyle::NewPresets2);
+                                        os_knob.set_text_size(12.0);
+                                        os_knob.set_fill_color(ACCENT);
+                                        os_knob.set_line_color(LIGHT);
+                                        ui.add(os_knob);
+            
+                                        let mut interleave_knob = ui_knob::ArcKnob::for_param(
+                                            &params.interleaves,
+                                            setter,
+                                            VERT_BAR_WIDTH - 4.0,
+                                        );
+                                        interleave_knob.preset_style(ui_knob::KnobStyle::NewPresets2);
+                                        interleave_knob.set_text_size(8.0);
+                                        interleave_knob.set_fill_color(ACCENT);
+                                        interleave_knob.set_line_color(LIGHT);
+                                        ui.add(interleave_knob);
+            
+                                        let mut gain_knob = ui_knob::ArcKnob::for_param(
+                                            &params.input_gain,
+                                            setter,
+                                            VERT_BAR_WIDTH - 4.0,
+                                        );
+                                        gain_knob.preset_style(ui_knob::KnobStyle::NewPresets2);
+                                        gain_knob.set_text_size(10.0);
+                                        gain_knob.set_fill_color(ACCENT);
+                                        gain_knob.set_line_color(LIGHT);
+                                        ui.add(gain_knob);
+            
+                                        let mut output_knob = ui_knob::ArcKnob::for_param(
+                                            &params.output_gain,
+                                            setter,
+                                            VERT_BAR_WIDTH - 4.0,
+                                        );
+                                        output_knob.preset_style(ui_knob::KnobStyle::NewPresets2);
+                                        output_knob.set_text_size(10.0);
+                                        output_knob.set_fill_color(ACCENT);
+                                        output_knob.set_line_color(LIGHT);
+                                        ui.add(output_knob);
+            
+                                        let mut dry_wet_knob = ui_knob::ArcKnob::for_param(
+                                            &params.dry_wet,
+                                            setter,
+                                            VERT_BAR_WIDTH - 4.0,
+                                        );
+                                        dry_wet_knob.preset_style(ui_knob::KnobStyle::NewPresets2);
+                                        dry_wet_knob.set_text_size(10.0);
+                                        dry_wet_knob.set_fill_color(ACCENT);
+                                        dry_wet_knob.set_line_color(LIGHT);
+                                        ui.add(dry_wet_knob);
+                                    });
                                 });
                             });
-
-                        ui.horizontal(|ui| {
-                            let mut os_knob = ui_knob::ArcKnob::for_param(
-                                &params.oversampling,
-                                setter,
-                                VERT_BAR_WIDTH,
-                            );
-                            os_knob.preset_style(ui_knob::KnobStyle::NewPresets2);
-                            os_knob.set_text_size(10.0);
-                            os_knob.set_fill_color(TEAL);
-                            os_knob.set_line_color(WHITE);
-                            ui.add(os_knob);
-
-                            let mut gain_knob = ui_knob::ArcKnob::for_param(
-                                &params.input_gain,
-                                setter,
-                                VERT_BAR_WIDTH,
-                            );
-                            gain_knob.preset_style(ui_knob::KnobStyle::NewPresets2);
-                            gain_knob.set_text_size(10.0);
-                            gain_knob.set_fill_color(TEAL);
-                            gain_knob.set_line_color(WHITE);
-                            ui.add(gain_knob);
-
-                            let mut output_knob = ui_knob::ArcKnob::for_param(
-                                &params.output_gain,
-                                setter,
-                                VERT_BAR_WIDTH,
-                            );
-                            output_knob.preset_style(ui_knob::KnobStyle::NewPresets2);
-                            output_knob.set_text_size(10.0);
-                            output_knob.set_fill_color(TEAL);
-                            output_knob.set_line_color(WHITE);
-                            ui.add(output_knob);
-
-                            let mut dry_wet_knob = ui_knob::ArcKnob::for_param(
-                                &params.dry_wet,
-                                setter,
-                                VERT_BAR_WIDTH,
-                            );
-                            dry_wet_knob.preset_style(ui_knob::KnobStyle::NewPresets2);
-                            dry_wet_knob.set_text_size(10.0);
-                            dry_wet_knob.set_fill_color(TEAL);
-                            dry_wet_knob.set_line_color(WHITE);
-                            ui.add(dry_wet_knob);
-                        });
                     });
                 });
             },
@@ -661,38 +734,145 @@ impl Plugin for FawnFaders {
             // Calculate our amplitude for the decibel meter
             in_amplitude += in_l + in_r;
 
-            //let os = self.params.oversampling.value() as i32;
-            eq.bands[0].update(
-                sr,
-                self.params.freq_band_0.value(),
-                self.params.gain_band_0.value(),
-                self.params.res_band_0.value(),
-            );
-            //eq.bands[1].update(sr, self.params.freq_band_1.value(), self.params.gain_band_1.value(), self.params.res_band_1.value());
-            //eq.bands[2].update(sr, self.params.freq_band_2.value(), self.params.gain_band_2.value(), self.params.res_band_2.value());
-            //eq.bands[3].update(sr, self.params.freq_band_3.value(), self.params.gain_band_3.value(), self.params.res_band_3.value());
-            //eq.bands[4].update(sr, self.params.freq_band_4.value(), self.params.gain_band_4.value(), self.params.res_band_4.value());
-
-            // Perform processing on the sample using the filters
-            for filter in eq.bands.iter_mut() {
-                let mut temp_l: f32 = 0.0;
-                let mut temp_r: f32 = 0.0;
-                for i in 0..=self.params.oversampling.value() as usize {
-                    match i {
-                        0 => {
-                            (temp_l, temp_r) = filter.process_sample(in_l, in_r);
-                        },
-                        _ => {
-                            (temp_l, temp_r) = filter.process_sample(temp_l, temp_r);
-                        }
-                    }
-                    
-                }
-
-                // Sum up our output
-                processed_sample_l += temp_l;
-                processed_sample_r += temp_r;
+            // Set our interleaves
+            let interleave = self.params.interleaves.value();
+            for filter in eq.interleave_bands.iter_mut() {
+                filter.set_interleave(interleave as usize);
             }
+
+            // Update our types
+            eq.interleave_bands[0].set_type(self.params.type_0.value());
+            eq.interleave_bands[1].set_type(self.params.type_1.value());
+            eq.interleave_bands[2].set_type(self.params.type_2.value());
+            eq.interleave_bands[3].set_type(self.params.type_3.value());
+            eq.interleave_bands[4].set_type(self.params.type_4.value());
+            eq.non_interleave_bands[0].set_type(self.params.type_0.value());
+            eq.non_interleave_bands[1].set_type(self.params.type_1.value());
+            eq.non_interleave_bands[2].set_type(self.params.type_2.value());
+            eq.non_interleave_bands[3].set_type(self.params.type_3.value());
+            eq.non_interleave_bands[4].set_type(self.params.type_4.value());
+
+            if interleave >= 2.0 {
+                // Use the interleaved biquads
+                eq.interleave_bands[0].update(
+                    sr,
+                    self.params.freq_band_0.value(),
+                    self.params.gain_band_0.value(),
+                    self.params.res_band_0.value(),
+                );
+                eq.interleave_bands[1].update(
+                    sr,
+                    self.params.freq_band_1.value(),
+                    self.params.gain_band_1.value(),
+                    self.params.res_band_1.value(),
+                );
+                eq.interleave_bands[2].update(
+                    sr,
+                    self.params.freq_band_2.value(),
+                    self.params.gain_band_2.value(),
+                    self.params.res_band_2.value(),
+                );
+                eq.interleave_bands[3].update(
+                    sr,
+                    self.params.freq_band_3.value(),
+                    self.params.gain_band_3.value(),
+                    self.params.res_band_3.value(),
+                );
+                eq.interleave_bands[4].update(
+                    sr,
+                    self.params.freq_band_4.value(),
+                    self.params.gain_band_4.value(),
+                    self.params.res_band_4.value(),
+                );
+
+                // Perform processing on the sample using the filters
+                let mut temp_l: f32 = -2.0;
+                let mut temp_r: f32 = -2.0;
+                for filter in eq.interleave_bands.iter_mut() {
+                    for i in 0..=self.params.oversampling.value() as usize {
+                        match i {
+                            0 => {
+                                if temp_l == -2.0 {
+                                    // This is the first time we run a filter at all
+                                    (temp_l, temp_r) = filter.process_sample(in_l, in_r);
+                                } else {
+                                    // This is not the first time or first filter but first iteration of "A filter"
+                                    (temp_l, temp_r) = filter.process_sample(temp_l, temp_r);                                    
+                                }
+                            },
+                            _ => {
+                                // These are subsequent filter iterations for any filter in the order
+                                (temp_l, temp_r) = filter.process_sample(temp_l, temp_r);
+                            }
+                        }
+                        filter.increment_index();
+                    }
+
+                    // Sum up our output
+                    processed_sample_l = temp_l;
+                    processed_sample_r = temp_r;
+                }
+            } else {
+                // No interleaved biquads
+                eq.non_interleave_bands[0].update(
+                    sr,
+                    self.params.freq_band_0.value(),
+                    self.params.gain_band_0.value(),
+                    self.params.res_band_0.value(),
+                );
+                eq.non_interleave_bands[1].update(
+                    sr,
+                    self.params.freq_band_1.value(),
+                    self.params.gain_band_1.value(),
+                    self.params.res_band_1.value(),
+                );
+                eq.non_interleave_bands[2].update(
+                    sr,
+                    self.params.freq_band_2.value(),
+                    self.params.gain_band_2.value(),
+                    self.params.res_band_2.value(),
+                );
+                eq.non_interleave_bands[3].update(
+                    sr,
+                    self.params.freq_band_3.value(),
+                    self.params.gain_band_3.value(),
+                    self.params.res_band_3.value(),
+                );
+                eq.non_interleave_bands[4].update(
+                    sr,
+                    self.params.freq_band_4.value(),
+                    self.params.gain_band_4.value(),
+                    self.params.res_band_4.value(),
+                );
+
+                // Perform processing on the sample using the filters
+                let mut temp_l: f32 = -2.0;
+                let mut temp_r: f32 = -2.0;
+                for filter in eq.non_interleave_bands.iter_mut() {
+                    for i in 0..=self.params.oversampling.value() as usize {
+                        match i {
+                            0 => {
+                                if temp_l == -2.0 {
+                                    // This is the first time we run a filter at all
+                                    (temp_l, temp_r) = filter.process_sample(in_l, in_r);
+                                } else {
+                                    // This is not the first time or first filter but first iteration of "A filter"
+                                    (temp_l, temp_r) = filter.process_sample(temp_l, temp_r);                                    
+                                }
+                            },
+                            _ => {
+                                // These are subsequent filter iterations for any filter in the order
+                                (temp_l, temp_r) = filter.process_sample(temp_l, temp_r);
+                            }
+                        }
+
+                    }
+                    // Sum up our output
+                    processed_sample_l = temp_l;
+                    processed_sample_r = temp_r;
+                }
+            }
+
             // Calculate dry/wet mix
             let wet_gain = dry_wet;
             let dry_gain = 1.0 - dry_wet;
@@ -758,8 +938,8 @@ impl Plugin for FawnFaders {
     fn deactivate(&mut self) {}
 }
 
-impl ClapPlugin for FawnFaders {
-    const CLAP_ID: &'static str = "com.ardura.fawnfaders";
+impl ClapPlugin for Interleaf {
+    const CLAP_ID: &'static str = "com.ardura.Interleaf";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("An EQ");
     const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
@@ -772,11 +952,26 @@ impl ClapPlugin for FawnFaders {
     ];
 }
 
-impl Vst3Plugin for FawnFaders {
-    const VST3_CLASS_ID: [u8; 16] = *b"FawnFadersAAAAAA";
+impl Vst3Plugin for Interleaf {
+    const VST3_CLASS_ID: [u8; 16] = *b"InterleafAAAAAAA";
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
         &[Vst3SubCategory::Fx, Vst3SubCategory::Eq];
 }
 
-nih_export_clap!(FawnFaders);
-nih_export_vst3!(FawnFaders);
+nih_export_clap!(Interleaf);
+nih_export_vst3!(Interleaf);
+
+// I use this when I want to remove label and unit from a param in gui
+pub fn format_nothing() -> Arc<dyn Fn(f32) -> String + Send + Sync> {
+    Arc::new(move |_| String::new())
+}
+
+// This formats the interleave knob
+pub fn format_interleave() -> Arc<dyn Fn(f32) -> String + Send + Sync> {
+    Arc::new(move | input_number | if input_number < 2.0 {String::from("Off")} else {String::from(input_number.to_string())})
+}
+
+// This formats the x2 knob - this is like this because of using the value to control looping
+pub fn format_x2() -> Arc<dyn Fn(f32) -> String + Send + Sync> {
+    Arc::new(move | input_number | if input_number == 1.0 {String::from("On")} else {String::from("Off")})
+}

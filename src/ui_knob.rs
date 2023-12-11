@@ -101,6 +101,7 @@ pub struct ArcKnob<'a, P: Param> {
     outline: bool,
     padding: f32,
     show_label: bool,
+    swap_label_and_value: bool,
 }
 
 #[allow(dead_code)]
@@ -136,7 +137,14 @@ impl<'a, P: Param> ArcKnob<'a, P> {
             outline: false,
             padding: 10.0,
             show_label: true,
+            swap_label_and_value: true,
         }
+    }
+
+    // Undo newer swap label and value
+    pub fn set_swap_label_and_value(&mut self, use_old: bool) -> &Self {
+        self.swap_label_and_value = use_old;
+        self
     }
 
     // Specify outline drawing
@@ -261,6 +269,7 @@ impl<'a, P: Param> ArcKnob<'a, P> {
                 self.center_size = self.radius * 0.5;
                 self.line_width = self.radius * 0.5;
                 self.center_to_line_space = self.radius * 0.0125;
+                self.swap_label_and_value = true;
                 self.padding = 0.0;
             }
         }
@@ -341,11 +350,24 @@ impl<'a, P: Param> Widget for ArcKnob<'a, P> {
                 self.padding * 2.0
             };
             if self.show_label {
-                let label_pos = Pos2::new(
-                    response.rect.center_bottom().x,
-                    response.rect.center_bottom().y - label_y,
-                );
-                let value_pos = Pos2::new(response.rect.center().x, response.rect.center().y);
+                let value_pos: Pos2;
+                let label_pos: Pos2;
+                if self.swap_label_and_value {
+                    // Newer rearranged positions to put value at bottom of knob
+                    value_pos = Pos2::new(
+                        response.rect.center_bottom().x,
+                        response.rect.center_bottom().y - label_y,
+                    );
+                    label_pos = Pos2::new(response.rect.center().x, response.rect.center().y);
+                } else {
+                    // The old value and label positions
+                    label_pos = Pos2::new(
+                        response.rect.center_bottom().x,
+                        response.rect.center_bottom().y - label_y,
+                    );
+                    value_pos = Pos2::new(response.rect.center().x, response.rect.center().y);
+                }
+                
                 if self.label_text.is_empty() {
                     painter.text(
                         value_pos,

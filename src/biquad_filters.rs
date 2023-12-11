@@ -2,13 +2,16 @@
 // I wanted to rewrite it myself to understand it better and make things clearer
 // Adapted to rust by Ardura
 
+use nih_plug::params::enums::Enum;
+
 // This is for my sanity
 const LEFT: usize = 0;
 const RIGHT: usize = 1;
 
 // These are the filter types implemented
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Enum, PartialEq)]
 pub(crate) enum FilterType {
+    Off,
     LowPass,
     HighPass,
     BandPass,
@@ -42,6 +45,14 @@ impl BiquadCoefficients {
         let cos_omega = omega.cos();
         let sin_omega = omega.sin();
         match biquad_type {
+            FilterType::Off => {
+                b0 =   0.0;
+                b1 =   0.0;
+                b2 =   0.0;
+                a0 =   0.0;
+                a1 =   0.0;
+                a2 =   0.0;
+            }
             FilterType::LowPass => {
                 b0 =  (1.0 - cos_omega)/2.0;
                 b1 =   1.0 - cos_omega;
@@ -131,6 +142,15 @@ pub(crate) struct Biquad {
     coeffs: BiquadCoefficients,
 }
 
+// This is for interleaving biquad structs - Airwindows inspired
+// 10 interleave max is just my decision
+#[derive(Clone, Copy)]
+pub(crate) struct InterleavedBiquad {
+    interleaves: usize,
+    current_index: usize,
+    biquad_array: [Biquad; 10],
+}
+
 impl Biquad {
     pub fn new(sample_rate: f32, center_freq: f32, gain_db: f32, q_factor: f32, biquad_type: FilterType) -> Self {
         let omega = 2.0 * std::f32::consts::PI * center_freq / sample_rate;
@@ -175,8 +195,21 @@ impl Biquad {
         }
     }
 
+    pub fn set_type(&mut self, biquad_type: FilterType) {
+        if self.biquad_type != biquad_type {
+            self.biquad_type = biquad_type;
+            // Calculate our intermediate variables from our new info and create new coefficients
+            let omega = 2.0 * std::f32::consts::PI * self.center_freq / self.sample_rate;
+            let alpha = (omega.sin()) / (2.0 * self.q_factor);
+            self.coeffs = BiquadCoefficients::new(self.biquad_type, alpha, omega, self.gain_db);
+        }
+    }
+
     // I'll handle the oversampling/ordering from the calling thread, I'm trying to K.I.S.S.
     pub fn process_sample(&mut self, input_l: f32, input_r: f32) -> (f32, f32) {
+        if self.biquad_type == FilterType::Off {
+            return (input_l, input_r)
+        }
         // Using RBJ's Direct Form I straight from the cookbook
         let output_l;
         let output_r;
@@ -204,6 +237,50 @@ impl Biquad {
         self.output_history[1][RIGHT] = self.output_history[0][RIGHT];
         self.output_history[0][RIGHT] = output_r;
 
+        (output_l, output_r)
+    }
+}
+
+impl InterleavedBiquad {
+    pub fn new(sample_rate: f32, center_freq: f32, gain_db: f32, q_factor: f32, biquad_type: FilterType, new_interleave: usize) -> Self {
+        InterleavedBiquad {
+            interleaves: new_interleave,
+            current_index: 0,
+            biquad_array: [Biquad::new(sample_rate, center_freq, gain_db, q_factor, biquad_type); 10],
+        }
+    }
+
+    pub fn update(&mut self, sample_rate: f32, center_freq: f32, gain_db: f32, q_factor: f32) {
+        for biquad in self.biquad_array.iter_mut() {
+            biquad.update(sample_rate, center_freq, gain_db, q_factor);
+        }
+    }
+    
+    pub fn set_type(&mut self, biquad_type: FilterType) {
+        for biquad in self.biquad_array.iter_mut() {
+            biquad.set_type(biquad_type);
+        }
+    }
+
+    pub fn set_interleave(&mut self, new_interleave: usize) {
+        self.interleaves = new_interleave.clamp(2, 10);
+    }
+
+    pub fn increment_index(&mut self) {
+        // Increment our index
+        self.current_index += 1;
+
+        if self.current_index >= self.interleaves {
+            self.current_index = 0;
+        }
+    }
+
+    pub fn process_sample(&mut self, input_l: f32, input_r: f32) -> (f32, f32) {
+        let output_l;
+        let output_r;
+        (output_l, output_r) = self.biquad_array[self.current_index].process_sample(input_l, input_r);
+
+        // Return
         (output_l, output_r)
     }
 }
